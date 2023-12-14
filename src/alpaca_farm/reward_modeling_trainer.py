@@ -21,30 +21,37 @@ import transformers
 from transformers.trainer_utils import EvalPrediction
 
 from alpaca_farm import common, torch_ops
-
+from alpaca_farm.models import reward_model
 
 class Trainer(transformers.Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model: reward_model.RewardModel, inputs, return_outputs=False):
         # input_ids, attention_mask each of size (bsz, num_candidates, seq_len).
         # index_0, index_1 each of size (bsz, num_pairs); indexes into input_ids.
         # choice of size (bsz, num_pairs); 1 if index_1's seq is chosen, 0 otherwise.
         input_ids, attention_mask, index_0, index_1, choice = common.unpack_dict(
             inputs, keys=("input_ids", "attention_mask", "index_0", "index_1", "choice")
         )
-        num_candidates, num_pairs = input_ids.size(1), choice.size(1)
+        batch_size, num_candidates, num_pairs = input_ids.size(0), input_ids.size(1), choice.size(1)
         input_ids_flat, attention_mask_flat = tuple(
             einops.rearrange(x, "b c l -> (b c) l") for x in (input_ids, attention_mask)
         )
-        outputs = model(input_ids=input_ids_flat, attention_mask=attention_mask_flat)
-        rewards_flat = outputs.rewards
-        rewards = einops.rearrange(rewards_flat, "(b c) -> b c", c=num_candidates)  # Size: (bsz, num_candidates).
-
-        rewards_0, rewards_1 = tuple(
-            torch_ops.batch_select(rewards, index) for index in (index_0, index_1)
-        )  # Size: (bsz, num_pairs).
-        logits = rewards_1 - rewards_0  # Size: (bsz, num_pairs).
-        # Type casting of `choice` is due to amp.autocast context manager.
-        loss = F.binary_cross_entropy_with_logits(logits, choice.to(logits.dtype), reduction="mean")
+        with torch.no_grad():
+            last_hidden_state_at_the_end = model.forward_hidden(input_ids=input_ids_flat, attention_mask=attention_mask_flat).detach()
+        
+        loss = 0
+        logits = 0
+        for reward_head in model.reward_heads:
+            rewards_flat = reward_head(last_hidden_state_at_the_end).squeeze(-1)
+            rewards = einops.rearrange(rewards_flat, "(b c) -> b c", c=num_candidates)  # Size: (bsz, num_candidates).
+            rewards_0, rewards_1 = tuple(
+                torch_ops.batch_select(rewards, index) for index in (index_0, index_1)
+            )  # Size: (bsz, num_pairs).
+            logits += rewards_1 - rewards_0  # Size: (bsz, num_pairs).
+            sampled_idxs = torch.randint(0, batch_size, batch_size)
+            sampled_logits = logits[sampled_idxs]
+            # Type casting of `choice` is due to amp.autocast context manager.
+            loss += F.binary_cross_entropy_with_logits(sampled_logits, choice.to(sampled_logits.dtype), reduction="mean")
+        logits /= len(model.reward_heads)
         return (loss, dict(logits=logits)) if return_outputs else loss
 
 
