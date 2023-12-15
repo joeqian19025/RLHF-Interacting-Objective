@@ -65,12 +65,12 @@ class PPOTrainer(rl_trainer.RLTrainer):
         )
 
     def _shape_reward(
-        self, rewards: Tensor, responses: Tensor, logprobs: Tensor, ref_logprobs: Tensor
+        self, rewards: Tensor, reward_uncertainties: Tensor, responses: Tensor, logprobs: Tensor, ref_logprobs: Tensor
     ) -> Dict[str, Tensor]:
         # For some reason, line below doesn't work.
         # kl = (logits.softmax(dim=-1) * (logits.log_softmax(dim=-1) - ref_logits.log_softmax(dim=-1))).sum(dim=-1)
         kl = torch.clamp(logprobs - ref_logprobs, min=0.0)
-        non_score_rewards = -self.kl_ctl.value * kl
+        non_score_rewards = -self.kl_ctl.value * self.kl_var_mixer(kl, reward_uncertainties)
         shaped_rewards = non_score_rewards.clone()
         # This introduces a small index off by one bug if pad_token_id == eos_token_id.
         terminal_positions = (responses != self.tokenizer.pad_token_id).sum(dim=1) - 1
@@ -176,6 +176,7 @@ class PPOTrainer(rl_trainer.RLTrainer):
             # Shape reward with KL penalty.
             shape_reward_outputs = self._shape_reward(
                 rewards=rollouts_batch["rewards"],
+                reward_uncertainties=rollouts_batch["reward_uncertainties"],
                 responses=rollouts_batch["responses"],
                 logprobs=rollouts_batch["logprobs"],
                 ref_logprobs=rollouts_batch["ref_logprobs"],

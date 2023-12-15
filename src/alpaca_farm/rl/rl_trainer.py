@@ -65,6 +65,7 @@ class RLTrainer(object):
         self.accelerator = accelerator
         self.lr_scheduler = lr_scheduler
         self.kl_ctl = kl_controller.make_kl_controller(args, self.accelerator)
+        self.kl_var_mixer = lambda kl, var: kl * var
         self.log_history = []
         self.args.set_truncate_token_ids(self.tokenizer)
         enable_full_determinism(self.args.seed) if self.args.full_determinism else set_seed(self.args.seed)
